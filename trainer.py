@@ -14,7 +14,6 @@ from typing import Dict, Union, Any, Optional, Callable, List, Tuple
 from transformers import Trainer, DataCollatorForSeq2Seq
 from transformers.utils import (
     is_sagemaker_mp_enabled,
-    is_torch_tpu_available,
     is_accelerate_available,
     is_apex_available,
     logging,
@@ -29,14 +28,15 @@ from transformers.trainer_utils import (
     EvalPrediction,
     EvalLoopOutput,
     denumpify_detensorize,
-    ShardedDDPOption,
 )
+
 from transformers.debug_utils import (
     DebugOption,
     DebugUnderflowOverflow,
 )
 from transformers.integrations import (
     hp_params,
+    ShardedDDPOption,
 )
 from transformers.integrations.deepspeed import (
     deepspeed_init, 
@@ -66,9 +66,7 @@ if is_apex_available():
     from apex import amp
 
 
-if is_torch_tpu_available(check_device=False):
-    import torch_xla.core.xla_model as xm
-    import torch_xla.debug.metrics as met
+# TPU support removed
 
 
 if is_sagemaker_mp_enabled():
@@ -408,7 +406,6 @@ class CustomTrainer(Trainer):
 
                 if (
                     args.logging_nan_inf_filter
-                    and not is_torch_tpu_available()
                     and (torch.isnan(tr_loss_step) or torch.isinf(tr_loss_step))
                 ):
                     # if loss is nan or inf simply add the average of previous logged losses
@@ -418,7 +415,6 @@ class CustomTrainer(Trainer):
 
                 if (
                     args.logging_nan_inf_filter
-                    and not is_torch_tpu_available()
                     and (torch.isnan(tr_core_loss_step) or torch.isinf(tr_core_loss_step))
                 ):
                     # if loss is nan or inf simply add the average of previous logged losses
@@ -450,10 +446,6 @@ class CustomTrainer(Trainer):
                         # deepspeed does its own clipping
 
                         if self.do_grad_scaling:
-                            # Reduce gradients first for XLA
-                            if is_torch_tpu_available():
-                                gradients = xm._fetch_gradients(self.optimizer)
-                                xm.all_reduce("sum", gradients, scale=1.0 / xm.xrt_world_size())
                             # AMP: gradients need unscaling
                             self.scaler.unscale_(self.optimizer)
 
@@ -479,14 +471,7 @@ class CustomTrainer(Trainer):
 
                     # Optimizer step
                     optimizer_was_run = True
-                    if is_torch_tpu_available():
-                        if self.do_grad_scaling:
-                            self.scaler.step(self.optimizer)
-                            self.scaler.update()
-                        else:
-                            # tpu-comment: accelerate wrapped optimizers call xm.optimizer_step
-                            self.optimizer.step()
-                    elif self.do_grad_scaling:
+                    if self.do_grad_scaling:
                         scale_before = self.scaler.get_scale()
                         self.scaler.step(self.optimizer)
                         self.scaler.update()
@@ -524,14 +509,9 @@ class CustomTrainer(Trainer):
             self._maybe_log_save_evaluate(tr_loss, tr_core_loss, model, trial, epoch, ignore_keys_for_eval)
 
             if DebugOption.TPU_METRICS_DEBUG in self.args.debug:
-                if is_torch_tpu_available():
-                    # tpu-comment: Logging debug metrics for PyTorch/XLA (compile, execute times, ops, etc.)
-                    xm.master_print(met.metrics_report())
-                else:
-                    logger.warning(
-                        "You enabled PyTorch/XLA debug metrics but you don't have a TPU "
-                        "configured. Check your training configuration if this is unexpected."
-                    )
+                logger.warning(
+                    "TPU support has been removed. TPU debug metrics are not available."
+                )
             if self.control.should_training_stop:
                 break
 
@@ -542,9 +522,7 @@ class CustomTrainer(Trainer):
         logger.info("\n\nTraining completed. Do not forget to share your model on huggingface.co/models =)\n\n")
         if args.load_best_model_at_end and self.state.best_model_checkpoint is not None:
             # Wait for everyone to get here so we are sure the model has been saved by process 0.
-            if is_torch_tpu_available():
-                xm.rendezvous("load_best_model_at_end")
-            elif args.parallel_mode == ParallelMode.DISTRIBUTED:
+            if args.parallel_mode == ParallelMode.DISTRIBUTED:
                 dist.barrier()
             elif is_sagemaker_mp_enabled():
                 smp.barrier()
@@ -594,8 +572,7 @@ class CustomTrainer(Trainer):
     
     def _maybe_log_save_evaluate(self, tr_loss, tr_core_loss, model, trial, epoch, ignore_keys_for_eval):
         if self.control.should_log:
-            if is_torch_tpu_available():
-                xm.mark_step()
+            # TPU mark_step removed
 
             logs: Dict[str, float] = {}
 
@@ -827,8 +804,7 @@ class CustomTrainer(Trainer):
         self.log(output.metrics)
 
         if DebugOption.TPU_METRICS_DEBUG in self.args.debug:
-            # tpu-comment: Logging debug metrics for PyTorch/XLA (compile, execute times, ops, etc.)
-            xm.master_print(met.metrics_report())
+            logger.warning("TPU support has been removed. TPU debug metrics are not available.")
 
         self.control = self.callback_handler.on_evaluate(self.args, self.state, self.control, output.metrics)
 
@@ -935,8 +911,7 @@ class CustomTrainer(Trainer):
             main_input_name = getattr(self.model, "main_input_name", "input_ids")
             inputs_decode = self._prepare_input(inputs[main_input_name]) if args.include_inputs_for_metrics else None
 
-            if is_torch_tpu_available():
-                xm.mark_step()
+            # TPU mark_step removed
 
             # Update containers on host
             if loss is not None:
