@@ -1,10 +1,21 @@
 import sys
+import os
 
 import torch
 from transformers import AutoTokenizer, AutoModelForCausalLM
 from peft import PeftModelForCausalLM
 
 from config import BASE_MODELS
+
+
+def is_local_path(path):
+    """检查是否为本地路径"""
+    if isinstance(path, str):
+        return (os.path.isabs(path) or 
+                path.startswith('./') or 
+                path.startswith('../') or
+                os.path.exists(path))
+    return False
 
 
 def get_device():
@@ -22,7 +33,13 @@ def load_tokenizer_and_model(model_name, base_model=None, device=None):
             base_model = BASE_MODELS[model_name]
     assert base_model is not None, "Please assign the corresponding base model to the argument 'base_model'."
 
-    tokenizer = AutoTokenizer.from_pretrained(base_model)
+    # 检查是否为本地路径
+    if is_local_path(base_model):
+        print(f"📁 使用本地基础模型: {os.path.abspath(base_model)}")
+        tokenizer = AutoTokenizer.from_pretrained(base_model, local_files_only=True)
+    else:
+        print(f"🌐 使用远程基础模型: {base_model}")
+        tokenizer = AutoTokenizer.from_pretrained(base_model)
     tokenizer.padding_side = 'left'
     tokenizer.pad_token = '<pad>'
     tokenizer.sep_token = '<unk>'
@@ -33,11 +50,19 @@ def load_tokenizer_and_model(model_name, base_model=None, device=None):
         device = get_device()
     
     if device == "cuda":
-        model = AutoModelForCausalLM.from_pretrained(
-            base_model,
-            torch_dtype=torch.bfloat16,
-            device_map="auto",
-        )
+        if is_local_path(base_model):
+            model = AutoModelForCausalLM.from_pretrained(
+                base_model,
+                torch_dtype=torch.bfloat16,
+                device_map="auto",
+                local_files_only=True,
+            )
+        else:
+            model = AutoModelForCausalLM.from_pretrained(
+                base_model,
+                torch_dtype=torch.bfloat16,
+                device_map="auto",
+            )
             
         model = PeftModelForCausalLM.from_pretrained(
             model,

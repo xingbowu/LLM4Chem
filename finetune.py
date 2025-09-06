@@ -12,6 +12,16 @@ import datetime
 from utils.chat_generation import generate_chat
 
 
+def is_local_path(path):
+    """检查是否为本地路径"""
+    if isinstance(path, str):
+        return (os.path.isabs(path) or 
+                path.startswith('./') or 
+                path.startswith('../') or
+                os.path.exists(path))
+    return False
+
+
 torch.distributed.init_process_group(backend="nccl", timeout=datetime.timedelta(seconds=5400))
 
 
@@ -27,6 +37,7 @@ from trainer import CustomTrainer, CustomDataCollator
 
 from utils.general_prompter import GeneralPrompter, get_chat_content
 from utils.core_tagger import CoreTagger
+from utils.dataset_loader import smart_load_dataset, print_dataset_info
 
 
 def set_random_seeds(seed: int = 13):
@@ -136,14 +147,27 @@ def train(
         dtype = torch.bfloat16
     else:
         raise ValueError("Please use bf16. Others are not tested.")
-    model = AutoModelForCausalLM.from_pretrained(
-        base_model,
-        load_in_8bit=use_int8,
-        torch_dtype=dtype,
-        device_map=device_map
-    )
-
-    tokenizer = AutoTokenizer.from_pretrained(base_model)
+    
+    # 检查是否为本地路径并加载模型
+    if is_local_path(base_model):
+        print(f"📁 使用本地基础模型进行微调: {os.path.abspath(base_model)}")
+        model = AutoModelForCausalLM.from_pretrained(
+            base_model,
+            load_in_8bit=use_int8,
+            torch_dtype=dtype,
+            device_map=device_map,
+            local_files_only=True
+        )
+        tokenizer = AutoTokenizer.from_pretrained(base_model, local_files_only=True)
+    else:
+        print(f"🌐 使用远程基础模型进行微调: {base_model}")
+        model = AutoModelForCausalLM.from_pretrained(
+            base_model,
+            load_in_8bit=use_int8,
+            torch_dtype=dtype,
+            device_map=device_map
+        )
+        tokenizer = AutoTokenizer.from_pretrained(base_model)
 
     bos = tokenizer.bos_token_id
     eos = tokenizer.eos_token_id
@@ -242,11 +266,14 @@ def train(
     if tasks is not None and len(tasks) == 0:
         tasks = None
 
-    train_data = load_dataset(data_path, split=train_split, tasks=tasks)
+    # 打印数据集信息
+    print_dataset_info(data_path, tasks)
+    
+    train_data = smart_load_dataset(data_path, split=train_split, tasks=tasks)
     train_data = train_data.shuffle().map(generate_and_tokenize_prompt)
 
     if use_val_set:
-        val_data = load_dataset(data_path, split=dev_split, tasks=tasks)
+        val_data = smart_load_dataset(data_path, split=dev_split, tasks=tasks)
         val_data = val_data.shuffle().map(generate_and_tokenize_prompt)
     else:
         val_data = None

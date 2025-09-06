@@ -5,12 +5,13 @@ from datasets import load_dataset
 
 from config import TASKS, TASKS_WITH_SEMICOLON_REPLACE, TASKS_WITH_READING_GOLD_FROM_DATASET
 from utils.metrics import calculate_smiles_metrics, calculate_formula_metrics, calculate_text_metrics, calculate_number_metrics, calculate_boolean_metrics
+from utils.dataset_loader import smart_load_dataset
 
 
 def read_result(prediction_dir, task, replace_semicolon=False, read_gold_from_dataset=False):
     input_to_gold = None
     if read_gold_from_dataset:
-        split_set = load_dataset('osunlp/SMolInstruct', tasks=(task,), split='test')
+        split_set = smart_load_dataset('osunlp/SMolInstruct', tasks=(task,), split='test')
         input_to_gold = dict()
         for sample in split_set:
             input_key = sample['raw_input']

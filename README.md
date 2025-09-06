@@ -121,6 +121,46 @@ Query: Identify possible reactants that could have been used to create the speci
 Response: <SMILES> CC(C#N)CCC#N.N </SMILES>
 ```
 
+## Local Path Support (本地路径支持)
+
+🚀 **本项目现已支持直接使用本地模型路径和数据集路径！**
+
+### 模型支持
+- **本地模型路径**：直接使用本地存储的模型文件，无需网络下载
+- **自动识别**：自动检测路径类型（本地/远程），透明切换
+- **快速加载**：避免网络延迟，加载速度更快
+- **离线使用**：完全离线环境下也能正常工作
+
+### 数据集支持  
+- **本地数据集**：支持本地JSON、CSV、Parquet等格式数据集
+- **多格式支持**：自动识别并加载不同格式的数据文件
+- **智能回退**：本地加载失败时自动尝试远程加载
+- **任务过滤**：支持按任务类型过滤数据
+
+### 快速使用本地路径
+
+```bash
+# 使用本地模型和远程数据集
+python finetune.py \
+    --base_model /path/to/your/local/model \
+    --data_path osunlp/SMolInstruct \
+    --output_dir checkpoint/my_model
+
+# 使用远程模型和本地数据集
+python finetune.py \
+    --base_model mistralai/Mistral-7B-v0.1 \
+    --data_path ./datasets/my_chemistry_data.json \
+    --output_dir checkpoint/my_model
+
+# 完全离线使用（本地模型+本地数据集）
+python finetune.py \
+    --base_model ./models/mistral-7b \
+    --data_path ./datasets/chemistry_data.json \
+    --output_dir checkpoint/my_model
+```
+
+详细使用说明请参考：[LOCAL_MODEL_USAGE.md](LOCAL_MODEL_USAGE.md)
+
 ## Training
 
 If you need to fine-tune a base model on SMolInstruct, please first clone this repo to your machine, and `cd` to the folder, then use the following command.

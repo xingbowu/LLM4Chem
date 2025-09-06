@@ -7,6 +7,7 @@ from datasets import load_dataset
 
 from config import TASKS_GENERATION_SETTINGS, TASKS, DEFAULT_MAX_INPUT_TOKENS, DEFAULT_MAX_NEW_TOKENS
 from generation import LlaSMolGeneration
+from utils.dataset_loader import smart_load_dataset, print_dataset_info
 
 
 def generate(
@@ -47,7 +48,8 @@ def generate(
         max_new_tokens = DEFAULT_MAX_NEW_TOKENS
 
     # Load dataset
-    data = load_dataset(data_path, split=split, tasks=(task,))
+    print_dataset_info(data_path, (task,))
+    data = smart_load_dataset(data_path, split=split, tasks=(task,))
     data = list(data)
 
     # Create output directory
