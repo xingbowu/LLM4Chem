@@ -1218,8 +1218,15 @@ class CustomDataCollator(DataCollatorForSeq2Seq):
                     feature["labels"] = np.concatenate([remainder, feature["labels"]]).astype(np.int64)
 
 
+        # 移除可能导致问题的非标准字段
+        cleaned_features = []
+        for feature in features:
+            cleaned_feature = {k: v for k, v in feature.items() 
+                             if k in ['input_ids', 'attention_mask', 'labels', 'core_mask']}
+            cleaned_features.append(cleaned_feature)
+        
         features = self.tokenizer.pad(
-            features,
+            cleaned_features,
             padding=self.padding,
             max_length=self.max_length,
             pad_to_multiple_of=self.pad_to_multiple_of,

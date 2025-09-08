@@ -70,7 +70,7 @@ def train(
     output_dir: str = "checkpoint",
     # training hyperparams
     batch_size: int = 512,
-    micro_batch_size: int = 4,
+    micro_batch_size: int = 16,  # 增加到16，充分利用80G显存
     num_epochs: int = 3,
     learning_rate: float = 1e-4,
     cutoff_len: int = 512,
@@ -108,6 +108,9 @@ def train(
     # distributed: FSDP configs
     fsdp: str = "",
     fsdp_config: dict = None,
+    # performance optimization
+    gradient_checkpointing: bool = False,  # FSDP 使用 activation_checkpointing
+    dataloader_num_workers: int = 8,  # 增加数据加载并行度
 ):
     if int(os.environ.get("LOCAL_RANK", 0)) == 0:
         print(
@@ -332,11 +335,11 @@ def train(
     print_dataset_info(data_path, tasks)
     
     train_data = smart_load_dataset(data_path, split=train_split, tasks=tasks)
-    train_data = train_data.shuffle().map(generate_and_tokenize_prompt, num_proc=8)
+    train_data = train_data.shuffle().map(generate_and_tokenize_prompt, num_proc=4)  # 减少进程数避免竞争
 
     if use_val_set:
         val_data = smart_load_dataset(data_path, split=dev_split, tasks=tasks)
-        val_data = val_data.shuffle().map(generate_and_tokenize_prompt,  num_proc=8)
+        val_data = val_data.shuffle().map(generate_and_tokenize_prompt, num_proc=4)
     else:
         val_data = None
 
@@ -373,6 +376,10 @@ def train(
             run_name=swanlab_run_name if use_swanlab else None,
             fsdp=fsdp if fsdp else None,
             fsdp_config=fsdp_config,
+            gradient_checkpointing=False if fsdp else gradient_checkpointing,  # 强制在FSDP时禁用
+            dataloader_num_workers=dataloader_num_workers,
+            dataloader_pin_memory=True,
+            remove_unused_columns=False,  # 避免数据重复处理
         ),
         data_collator=CustomDataCollator(
             tokenizer, pad_to_multiple_of=8, return_tensors="pt", padding=True
