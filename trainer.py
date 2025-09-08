@@ -112,6 +112,12 @@ class CustomTrainer(Trainer):
             self.sharded_ddp = None
         if not hasattr(self, 'fsdp'):
             self.fsdp = None
+        if not hasattr(self, 'do_grad_scaling'):
+            self.do_grad_scaling = False
+        if not hasattr(self, 'scaler'):
+            self.scaler = None
+        if not hasattr(self, 'use_apex'):
+            self.use_apex = False
 
     def _inner_training_loop(
         self, batch_size=None, args=None, resume_from_checkpoint=None, trial=None, ignore_keys_for_eval=None
@@ -672,7 +678,8 @@ class CustomTrainer(Trainer):
 
         # https://stackoverflow.com/questions/54924582/is-it-possible-to-freeze-only-certain-embedding-weights-in-the-embedding-layer-i
         # Tested on peft 0.6.2 and 0.7.0
-        if self.args.num_added_tokens > 0:
+        num_added_tokens = getattr(self.args, 'num_added_tokens', 0)
+        if num_added_tokens > 0:
             if isinstance(self.model.model.model.embed_tokens, peft.utils.other.ModulesToSaveWrapper):
                 try:
                     param = self.model.model.model.embed_tokens.modules_to_save['default'].weight
@@ -687,7 +694,7 @@ class CustomTrainer(Trainer):
                 raise ValueError(type(self.model.model.model.embed_tokens))
             assert param.requires_grad
             num_all = param.shape[0]
-            num_normal_tokens = num_all - self.args.num_added_tokens
+            num_normal_tokens = num_all - num_added_tokens
             param.grad[0: num_normal_tokens] = 0.0
 
             assert isinstance(self.model.model.lm_head, peft.utils.other.ModulesToSaveWrapper)

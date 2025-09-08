@@ -9,6 +9,14 @@ import transformers
 from datasets import load_dataset
 import datetime
 
+# SwanLab integration (替换 WandB)
+try:
+    import swanlab
+    _swanlab_available = True
+except ImportError:
+    _swanlab_available = False
+    print("SwanLab 未安装，请运行: pip install swanlab")
+
 from utils.chat_generation import generate_chat
 
 
@@ -81,11 +89,11 @@ def train(
     train_on_inputs: bool = True,  # if False, masks out inputs in loss
     add_eos_token: bool = False,
     group_by_length: bool = False,  # faster, but produces an odd training loss curve
-    # wandb params
-    wandb_project: str = "",
-    wandb_run_name: str = "",
-    wandb_watch: str = "",  # options: false | gradients | all
-    wandb_log_model: str = "",  # options: false | true
+    # swanlab params (replacing wandb)
+    swanlab_project: str = "",
+    swanlab_run_name: str = "",
+    swanlab_watch: str = "",  # options: false | gradients | all
+    swanlab_log_model: str = "",  # options: false | true
     resume_from_checkpoint: str = None,  # either training checkpoint or final adapter
     # prompt_template_name: str = "alpaca",  # The prompt template to use, will default to alpaca.
     logging_steps: int = 10,
@@ -122,10 +130,10 @@ def train(
             f"train_on_inputs: {train_on_inputs}\n"
             f"add_eos_token: {add_eos_token}\n"
             f"group_by_length: {group_by_length}\n"
-            f"wandb_project: {wandb_project}\n"
-            f"wandb_run_name: {wandb_run_name}\n"
-            f"wandb_watch: {wandb_watch}\n"
-            f"wandb_log_model: {wandb_log_model}\n"
+            f"swanlab_project: {swanlab_project}\n"
+            f"swanlab_run_name: {swanlab_run_name}\n"
+            f"swanlab_watch: {swanlab_watch}\n"
+            f"swanlab_log_model: {swanlab_log_model}\n"
             f"resume_from_checkpoint: {resume_from_checkpoint or False}\n"
             f"precision: {precision}\n"
             f"use_int8: {use_int8}\n"
@@ -155,16 +163,34 @@ def train(
         gradient_accumulation_steps = gradient_accumulation_steps // world_size
 
     # Check if parameter passed or if set within environ
-    use_wandb = len(wandb_project) > 0 or (
-        "WANDB_PROJECT" in os.environ and len(os.environ["WANDB_PROJECT"]) > 0
+    use_swanlab = len(swanlab_project) > 0 or (
+        "SWANLAB_PROJECT" in os.environ and len(os.environ["SWANLAB_PROJECT"]) > 0
     )
-    # Only overwrite environ if wandb param passed
-    if len(wandb_project) > 0:
-        os.environ["WANDB_PROJECT"] = wandb_project
-    if len(wandb_watch) > 0:
-        os.environ["WANDB_WATCH"] = wandb_watch
-    if len(wandb_log_model) > 0:
-        os.environ["WANDB_LOG_MODEL"] = wandb_log_model
+    # Only overwrite environ if swanlab param passed
+    if len(swanlab_project) > 0:
+        os.environ["SWANLAB_PROJECT"] = swanlab_project
+    if len(swanlab_watch) > 0:
+        os.environ["SWANLAB_WATCH"] = swanlab_watch
+    if len(swanlab_log_model) > 0:
+        os.environ["SWANLAB_LOG_MODEL"] = swanlab_log_model
+    
+    # 初始化 SwanLab（如果启用且可用）
+    if use_swanlab and _swanlab_available:
+        if int(os.environ.get("LOCAL_RANK", 0)) == 0:  # 只在主进程初始化
+            swanlab.init(
+                project=swanlab_project,
+                experiment_name=swanlab_run_name or "mistral-7b-chemistry",
+                config={
+                    "model": base_model,
+                    "batch_size": batch_size,
+                    "micro_batch_size": micro_batch_size,
+                    "learning_rate": learning_rate,
+                    "num_epochs": num_epochs,
+                    "lora_r": lora_r,
+                    "lora_alpha": lora_alpha,
+                    "fsdp": fsdp,
+                }
+            )
 
     if precision == 'bf16':
         dtype = torch.bfloat16
@@ -343,8 +369,8 @@ def train(
             load_best_model_at_end=True if val_data is not None else False,
             ddp_find_unused_parameters=False if ddp else None,
             group_by_length=group_by_length,
-            report_to="wandb" if use_wandb else None,
-            run_name=wandb_run_name if use_wandb else None,
+            report_to="swanlab" if use_swanlab else None,
+            run_name=swanlab_run_name if use_swanlab else None,
             fsdp=fsdp if fsdp else None,
             fsdp_config=fsdp_config,
         ),
