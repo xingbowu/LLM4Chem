@@ -36,7 +36,6 @@ from transformers.debug_utils import (
 )
 from transformers.integrations import (
     hp_params,
-    ShardedDDPOption,
 )
 from transformers.integrations.deepspeed import (
     deepspeed_init, 
@@ -57,7 +56,7 @@ from transformers.trainer_pt_utils import (
     nested_detach,
 )
 from transformers.trainer import TRAINER_STATE_NAME
-from transformers.pytorch_utils import is_torch_less_than_1_11
+import torch as _torch
 from transformers.modeling_utils import PreTrainedModel
 from transformers.data.data_collator import DataCollator
 
@@ -106,6 +105,14 @@ logger = logging.get_logger(__name__)
 
 
 class CustomTrainer(Trainer):
+    def __init__(self, *args, **kwargs):
+        super().__init__(*args, **kwargs)
+        # 确保必要的属性存在
+        if not hasattr(self, 'sharded_ddp'):
+            self.sharded_ddp = None
+        if not hasattr(self, 'fsdp'):
+            self.fsdp = None
+
     def _inner_training_loop(
         self, batch_size=None, args=None, resume_from_checkpoint=None, trial=None, ignore_keys_for_eval=None
     ):
@@ -173,10 +180,9 @@ class CustomTrainer(Trainer):
                 debug_overflow = DebugUnderflowOverflow(self.model)  # noqa
 
         delay_optimizer_creation = (
-            self.sharded_ddp is not None
-            and self.sharded_ddp != ShardedDDPOption.SIMPLE
+            (self.sharded_ddp is not None)
             or is_sagemaker_mp_enabled()
-            or self.fsdp is not None
+            or (self.fsdp is not None)
             or self.is_fsdp_enabled
         )
 
@@ -343,7 +349,7 @@ class CustomTrainer(Trainer):
             for epoch in range(epochs_trained):
                 sampler = get_dataloader_sampler(train_dataloader)
                 is_random_sampler = isinstance(sampler, RandomSampler)
-                if is_torch_less_than_1_11 or not is_random_sampler:
+                if (_torch.__version__.startswith("1.10") or _torch.__version__.startswith("1.9") or _torch.__version__.startswith("1.8") or _torch.__version__.startswith("1.7")) or not is_random_sampler:
                     # We just need to begin an iteration to create the randomization of the sampler.
                     for _ in train_dataloader:
                         break

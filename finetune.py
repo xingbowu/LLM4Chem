@@ -24,6 +24,11 @@ def is_local_path(path):
 
 torch.distributed.init_process_group(backend="nccl", timeout=datetime.timedelta(seconds=5400))
 
+# 在分布式初始化后设置 CUDA 设备
+if torch.distributed.is_initialized():
+    local_rank = int(os.environ.get("LOCAL_RANK", 0))
+    torch.cuda.set_device(local_rank)
+
 
 from peft import (
     LoraConfig,
@@ -92,6 +97,9 @@ def train(
     train_split='train',
     dev_split='validation',
     tasks: List[str] = None,
+    # distributed: FSDP configs
+    fsdp: str = "",
+    fsdp_config: dict = None,
 ):
     if int(os.environ.get("LOCAL_RANK", 0)) == 0:
         print(
@@ -121,14 +129,29 @@ def train(
             f"resume_from_checkpoint: {resume_from_checkpoint or False}\n"
             f"precision: {precision}\n"
             f"use_int8: {use_int8}\n"
+            f"fsdp: {fsdp}\n"
+            f"fsdp_config: {fsdp_config}\n"
         )
     gradient_accumulation_steps = batch_size // micro_batch_size
 
-    device_map = "auto"
     world_size = int(os.environ.get("WORLD_SIZE", 1))
     ddp = world_size != 1
+    
+    # If FSDP is enabled, avoid device_map/8bit to prevent conflicts
+    if fsdp:
+        if int(os.environ.get("LOCAL_RANK", 0)) == 0:
+            print("[FSDP] 已启用，禁用 device_map 与 8bit 加载以避免冲突")
+        device_map = None
+        if use_int8:
+            if int(os.environ.get("LOCAL_RANK", 0)) == 0:
+                print("[FSDP] use_int8 与 FSDP 不兼容，已自动关闭 use_int8")
+            use_int8 = False
+    else:
+        device_map = "auto"
+        if ddp:
+            device_map = {"": int(os.environ.get("LOCAL_RANK") or 0)}
+    
     if ddp:
-        device_map = {"": int(os.environ.get("LOCAL_RANK") or 0)}
         gradient_accumulation_steps = gradient_accumulation_steps // world_size
 
     # Check if parameter passed or if set within environ
@@ -156,6 +179,7 @@ def train(
             load_in_8bit=use_int8,
             torch_dtype=dtype,
             device_map=device_map,
+            low_cpu_mem_usage=True if fsdp else False,
             local_files_only=True
         )
         tokenizer = AutoTokenizer.from_pretrained(base_model, local_files_only=True)
@@ -165,7 +189,8 @@ def train(
             base_model,
             load_in_8bit=use_int8,
             torch_dtype=dtype,
-            device_map=device_map
+            device_map=device_map,
+            low_cpu_mem_usage=True if fsdp else False,
         )
         tokenizer = AutoTokenizer.from_pretrained(base_model)
 
@@ -240,6 +265,17 @@ def train(
         modules_to_save=modules_to_save,
     )
     model = get_peft_model(model, config)
+    
+    # 确保所有参数具有相同的数据类型，避免 FSDP 错误
+    if fsdp:
+        # 将所有参数转换为相同的数据类型
+        for param in model.parameters():
+            if param.dtype != dtype:
+                param.data = param.data.to(dtype)
+        # 同样处理 buffers
+        for buffer in model.buffers():
+            if buffer.dtype != dtype:
+                buffer.data = buffer.data.to(dtype)
 
     if resume_from_checkpoint:
         # Check the available weights and load them
@@ -270,11 +306,11 @@ def train(
     print_dataset_info(data_path, tasks)
     
     train_data = smart_load_dataset(data_path, split=train_split, tasks=tasks)
-    train_data = train_data.shuffle().map(generate_and_tokenize_prompt)
+    train_data = train_data.shuffle().map(generate_and_tokenize_prompt, num_proc=8)
 
     if use_val_set:
         val_data = smart_load_dataset(data_path, split=dev_split, tasks=tasks)
-        val_data = val_data.shuffle().map(generate_and_tokenize_prompt)
+        val_data = val_data.shuffle().map(generate_and_tokenize_prompt,  num_proc=8)
     else:
         val_data = None
 
@@ -291,13 +327,13 @@ def train(
             per_device_train_batch_size=micro_batch_size,
             gradient_accumulation_steps=gradient_accumulation_steps,
             warmup_steps=warmup_steps,
-            num_train_epochs=num_epochs,
+            num_train_epochs=float(num_epochs),
             learning_rate=learning_rate,
             fp16=True if 'fp16' == precision else False,
             bf16=True if 'bf16' == precision else False,
             logging_steps=logging_steps,
             optim=optim,
-            evaluation_strategy="steps" if val_data is not None else "no",
+            eval_strategy="steps" if val_data is not None else "no",
             save_strategy="steps",
             eval_steps=eval_steps if val_data is not None else None,
             save_steps=save_steps,
@@ -309,6 +345,8 @@ def train(
             group_by_length=group_by_length,
             report_to="wandb" if use_wandb else None,
             run_name=wandb_run_name if use_wandb else None,
+            fsdp=fsdp if fsdp else None,
+            fsdp_config=fsdp_config,
         ),
         data_collator=CustomDataCollator(
             tokenizer, pad_to_multiple_of=8, return_tensors="pt", padding=True
@@ -316,7 +354,7 @@ def train(
     )
     model.config.use_cache = False
 
-    if torch.__version__ >= "2" and sys.platform != "win32":
+    if torch.__version__ >= "2" and sys.platform != "win32" and not fsdp:
         model = torch.compile(model)
 
     trainer.train(resume_from_checkpoint=resume_from_checkpoint)
