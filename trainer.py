@@ -630,7 +630,7 @@ class CustomTrainer(Trainer):
                 self.lr_scheduler.step(metrics[metric_to_check])
 
         if self.control.should_save:
-            self._save_checkpoint(model, trial, metrics=metrics)
+            self._save_checkpoint(model, trial)
             self.control = self.callback_handler.on_save(self.args, self.state, self.control)
 
 
@@ -676,39 +676,7 @@ class CustomTrainer(Trainer):
         else:
             self.accelerator.backward(loss)
 
-        # https://stackoverflow.com/questions/54924582/is-it-possible-to-freeze-only-certain-embedding-weights-in-the-embedding-layer-i
-        # Tested on peft 0.6.2 and 0.7.0
-        num_added_tokens = getattr(self.args, 'num_added_tokens', 0)
-        if num_added_tokens > 0:
-            if isinstance(self.model.model.model.embed_tokens, peft.utils.other.ModulesToSaveWrapper):
-                try:
-                    param = self.model.model.model.embed_tokens.modules_to_save['default'].weight
-                except KeyError:
-                    print(self.model.model.model.embed_tokens.modules_to_save)
-                    raise
-                
-                
-            elif isinstance(self.model.model.model.embed_tokens, nn.Embedding):
-                param = self.model.model.model.embed_tokens.weight
-            else:
-                raise ValueError(type(self.model.model.model.embed_tokens))
-            assert param.requires_grad
-            num_all = param.shape[0]
-            num_normal_tokens = num_all - num_added_tokens
-            param.grad[0: num_normal_tokens] = 0.0
-
-            assert isinstance(self.model.model.lm_head, peft.utils.other.ModulesToSaveWrapper)
-            # try:
-            #     lm_head = self.model.model.lm_head
-            #     self.model.model.lm_head.weight.grad[0: num_normal_tokens] = 0.0
-            #     if lm_head.bias is not None:
-            #         self.model.model.lm_head.bias.grad[0: num_normal_tokens] = 0.0
-            # except AttributeError:
-            #     print(type(lm_head))
-            #     # print(lm_head)
-            #     print(type(self.model.model))
-            #     # print(self.model.model)
-            #     raise
+        # 梯度掩码现在通过register_hook在训练开始前设置，无需在training_step中手动修改
 
         return loss.detach() / self.args.gradient_accumulation_steps, core_loss.detach() / self.args.gradient_accumulation_steps
 

@@ -30,12 +30,13 @@ def is_local_path(path):
     return False
 
 
-torch.distributed.init_process_group(backend="nccl", timeout=datetime.timedelta(seconds=5400))
-
-# 在分布式初始化后设置 CUDA 设备
-if torch.distributed.is_initialized():
-    local_rank = int(os.environ.get("LOCAL_RANK", 0))
-    torch.cuda.set_device(local_rank)
+# 只在多GPU环境下初始化分布式训练
+if "RANK" in os.environ and "WORLD_SIZE" in os.environ:
+    torch.distributed.init_process_group(backend="nccl", timeout=datetime.timedelta(seconds=5400))
+    # 在分布式初始化后设置 CUDA 设备
+    if torch.distributed.is_initialized():
+        local_rank = int(os.environ.get("LOCAL_RANK", 0))
+        torch.cuda.set_device(local_rank)
 
 
 from peft import (
@@ -149,7 +150,7 @@ def train(
     ddp = world_size != 1
     
     # If FSDP is enabled, avoid device_map/8bit to prevent conflicts
-    if fsdp:
+    if fsdp and fsdp.strip():
         if int(os.environ.get("LOCAL_RANK", 0)) == 0:
             print("[FSDP] 已启用，禁用 device_map 与 8bit 加载以避免冲突")
         device_map = None
@@ -208,8 +209,9 @@ def train(
             load_in_8bit=use_int8,
             torch_dtype=dtype,
             device_map=device_map,
-            low_cpu_mem_usage=True if fsdp else False,
-            local_files_only=True
+            low_cpu_mem_usage=True if (fsdp and fsdp.strip()) else False,
+            local_files_only=True,
+            attn_implementation="flash_attention_2"
         )
         tokenizer = AutoTokenizer.from_pretrained(base_model, local_files_only=True)
     else:
@@ -219,7 +221,8 @@ def train(
             load_in_8bit=use_int8,
             torch_dtype=dtype,
             device_map=device_map,
-            low_cpu_mem_usage=True if fsdp else False,
+            low_cpu_mem_usage=True if (fsdp and fsdp.strip()) else False,
+            attn_implementation="flash_attention_2"
         )
         tokenizer = AutoTokenizer.from_pretrained(base_model)
 
@@ -296,7 +299,7 @@ def train(
     model = get_peft_model(model, config)
     
     # 确保所有参数具有相同的数据类型，避免 FSDP 错误
-    if fsdp:
+    if fsdp and fsdp.strip():
         # 将所有参数转换为相同的数据类型
         for param in model.parameters():
             if param.dtype != dtype:
@@ -327,6 +330,67 @@ def train(
             print(f"Checkpoint {checkpoint_name} not found")
             
     model.print_trainable_parameters()
+    
+    # 在训练开始前设置embedding权重的梯度掩码
+    # 这段代码应该在模型加载和添加新token后，但在调用trainer.train()之前执行
+    num_added_tokens = getattr(tokenizer, 'num_added_tokens', 0) if hasattr(tokenizer, 'num_added_tokens') else 0
+    if num_added_tokens > 0:
+        print(f"🔧 设置embedding层梯度掩码，新增token数量: {num_added_tokens}")
+        
+        # 处理embedding层
+        try:
+            # 适用于PEFT LoRA等场景
+            if hasattr(model.model.model.embed_tokens, 'modules_to_save') and 'default' in model.model.model.embed_tokens.modules_to_save:
+                embedding_layer = model.model.model.embed_tokens.modules_to_save['default']
+            else:
+                # 适用于原生模型
+                embedding_layer = model.model.model.embed_tokens
+            
+            embedding_weights = embedding_layer.weight
+            
+            if embedding_weights.requires_grad:
+                print(f"✅ 为embedding层注册梯度掩码hook，掩码前{embedding_weights.size(0) - num_added_tokens}个token")
+                
+                # 创建梯度掩码hook
+                def zero_grad_hook(grad):
+                    if grad is not None:
+                        grad[-num_added_tokens:] = 0
+                    return grad
+                    
+                embedding_weights.register_hook(zero_grad_hook)
+                print("✅ 成功注册embedding层梯度掩码hook")
+            else:
+                print("⚠️  embedding层权重不需要梯度，跳过hook注册")
+                
+        except Exception as e:
+            print(f"❌ 设置embedding层梯度掩码失败: {e}")
+        
+        # 处理lm_head层
+        try:
+            if hasattr(model.model, 'lm_head'):
+                if hasattr(model.model.lm_head, 'modules_to_save') and 'default' in model.model.lm_head.modules_to_save:
+                    lm_head_layer = model.model.lm_head.modules_to_save['default']
+                else:
+                    lm_head_layer = model.model.lm_head
+                
+                lm_head_weights = lm_head_layer.weight
+                
+                if lm_head_weights.requires_grad:
+                    print(f"✅ 为lm_head层注册梯度掩码hook，掩码前{lm_head_weights.size(0) - num_added_tokens}个token")
+                    
+                    # 创建梯度掩码hook
+                    def zero_grad_hook_lm_head(grad):
+                        if grad is not None:
+                            grad[-num_added_tokens:] = 0
+                        return grad
+                        
+                    lm_head_weights.register_hook(zero_grad_hook_lm_head)
+                    print("✅ 成功注册lm_head层梯度掩码hook")
+                else:
+                    print("⚠️  lm_head层权重不需要梯度，跳过hook注册")
+                    
+        except Exception as e:
+            print(f"❌ 设置lm_head层梯度掩码失败: {e}")
 
     if tasks is not None and len(tasks) == 0:
         tasks = None
@@ -335,7 +399,7 @@ def train(
     print_dataset_info(data_path, tasks)
     
     train_data = smart_load_dataset(data_path, split=train_split, tasks=tasks)
-    train_data = train_data.shuffle().map(generate_and_tokenize_prompt, num_proc=4)  # 减少进程数避免竞争
+    train_data = train_data.shuffle().map(generate_and_tokenize_prompt, num_proc=4)  # 减少并行进程避免竞争
 
     if use_val_set:
         val_data = smart_load_dataset(data_path, split=dev_split, tasks=tasks)
@@ -348,39 +412,46 @@ def train(
         model.is_parallelizable = True
         model.model_parallel = True
 
+    # 动态构建TrainingArguments参数
+    training_args = {
+        "per_device_train_batch_size": micro_batch_size,
+        "gradient_accumulation_steps": gradient_accumulation_steps,
+        "warmup_steps": warmup_steps,
+        "num_train_epochs": float(num_epochs),
+        "learning_rate": learning_rate,
+        "fp16": True if 'fp16' == precision else False,
+        "bf16": True if 'bf16' == precision else False,
+        "logging_steps": logging_steps,
+        "optim": optim,
+        "eval_strategy": "steps" if val_data is not None else "no",
+        "save_strategy": "steps",
+        "eval_steps": eval_steps if val_data is not None else None,
+        "save_steps": save_steps,
+        "lr_scheduler_type": lr_scheduler,
+        "output_dir": output_dir,
+        "save_total_limit": save_total_limit,
+        "load_best_model_at_end": True if val_data is not None else False,
+        "ddp_find_unused_parameters": False if ddp else None,
+        "group_by_length": group_by_length,
+        "report_to": "swanlab" if use_swanlab else None,
+        "run_name": swanlab_run_name if use_swanlab else None,
+        "gradient_checkpointing": False if (fsdp and fsdp.strip()) else gradient_checkpointing,
+        "dataloader_num_workers": dataloader_num_workers,
+        "dataloader_pin_memory": True,
+        "remove_unused_columns": False,
+    }
+    
+    # 只在FSDP启用时添加FSDP相关参数
+    if fsdp and fsdp.strip():
+        training_args["fsdp"] = fsdp
+        if fsdp_config:
+            training_args["fsdp_config"] = fsdp_config
+    
     trainer = CustomTrainer(
         model=model,
         train_dataset=train_data,
         eval_dataset=val_data,
-        args=transformers.TrainingArguments(
-            per_device_train_batch_size=micro_batch_size,
-            gradient_accumulation_steps=gradient_accumulation_steps,
-            warmup_steps=warmup_steps,
-            num_train_epochs=float(num_epochs),
-            learning_rate=learning_rate,
-            fp16=True if 'fp16' == precision else False,
-            bf16=True if 'bf16' == precision else False,
-            logging_steps=logging_steps,
-            optim=optim,
-            eval_strategy="steps" if val_data is not None else "no",
-            save_strategy="steps",
-            eval_steps=eval_steps if val_data is not None else None,
-            save_steps=save_steps,
-            lr_scheduler_type=lr_scheduler,
-            output_dir=output_dir,
-            save_total_limit=save_total_limit,
-            load_best_model_at_end=True if val_data is not None else False,
-            ddp_find_unused_parameters=False if ddp else None,
-            group_by_length=group_by_length,
-            report_to="swanlab" if use_swanlab else None,
-            run_name=swanlab_run_name if use_swanlab else None,
-            fsdp=fsdp if fsdp else None,
-            fsdp_config=fsdp_config,
-            gradient_checkpointing=False if fsdp else gradient_checkpointing,  # 强制在FSDP时禁用
-            dataloader_num_workers=dataloader_num_workers,
-            dataloader_pin_memory=True,
-            remove_unused_columns=False,  # 避免数据重复处理
-        ),
+        args=transformers.TrainingArguments(**training_args),
         data_collator=CustomDataCollator(
             tokenizer, pad_to_multiple_of=8, return_tensors="pt", padding=True
         ),
