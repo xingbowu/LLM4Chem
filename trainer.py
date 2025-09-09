@@ -3,6 +3,7 @@ import torch
 import torch.nn as nn
 import torch.distributed as dist
 from torch.utils.data import DataLoader, Dataset, RandomSampler, SequentialSampler
+import torch.profiler as profiler
 import math
 import time
 import os
@@ -392,6 +393,28 @@ class CustomTrainer(Trainer):
                 rng_to_sync = True
 
             step = -1
+            
+            # 设置profiling（如果启用）
+            profiler_obj = None
+            writer = None
+            if hasattr(args, 'enable_profiling') and args.enable_profiling:
+                profile_steps = getattr(args, 'profile_steps', 20)
+                profile_dir = getattr(args, 'profile_dir', './profiling_logs')
+                os.makedirs(profile_dir, exist_ok=True)
+                
+                # 创建TensorBoard writer
+                from torch.utils.tensorboard import SummaryWriter
+                writer = SummaryWriter(profile_dir)
+                
+                profiler_obj = profiler.profile(
+                    schedule=profiler.schedule(wait=1, warmup=1, active=profile_steps, repeat=1),
+                    record_shapes=True,
+                    profile_memory=True,
+                    with_stack=True
+                )
+                profiler_obj.start()
+                print(f"🔍 开始profiling，将记录前{profile_steps}步的详细信息到 {profile_dir}")
+            
             for step, inputs in enumerate(epoch_iterator):
                 total_batched_samples += 1
                 if rng_to_sync:
@@ -414,6 +437,10 @@ class CustomTrainer(Trainer):
                     self.control = self.callback_handler.on_step_begin(args, self.state, self.control)
 
                 with self.accelerator.accumulate(model):
+                    # 添加profiling步骤
+                    if profiler_obj is not None:
+                        profiler_obj.step()
+                    
                     tr_loss_step, tr_core_loss_step = self.training_step(model, inputs)
 
                 if (
@@ -526,6 +553,39 @@ class CustomTrainer(Trainer):
                 )
             if self.control.should_training_stop:
                 break
+
+        # 停止profiling
+        if profiler_obj is not None:
+            profiler_obj.stop()
+            
+            # 导出profiler数据到TensorBoard
+            if writer is not None:
+                # 导出trace文件
+                profiler_obj.export_chrome_trace(os.path.join(profile_dir, "trace.json"))
+                
+                # 添加profiler统计信息
+                events = profiler_obj.events()
+                if events:
+                    total_duration = sum(event.duration for event in events if hasattr(event, 'duration'))
+                    cpu_events = [e for e in events if e.device_type == profiler.ProfilerActivity.CPU]
+                    cuda_events = [e for e in events if e.device_type == profiler.ProfilerActivity.CUDA]
+                    
+                    writer.add_scalar("profiler/total_duration", total_duration, 0)
+                    writer.add_scalar("profiler/cpu_events", len(cpu_events), 0)
+                    writer.add_scalar("profiler/cuda_events", len(cuda_events), 0)
+                    writer.add_text("profiler_info", f"Profiling completed with {len(events)} events")
+                    
+                    print(f"   总事件数: {len(events)}")
+                    print(f"   CPU事件数: {len(cpu_events)}")
+                    print(f"   CUDA事件数: {len(cuda_events)}")
+                    print(f"   总持续时间: {total_duration:.2f}μs")
+                
+                writer.close()
+            
+            print(f"🔍 Profiling完成，结果已保存到 {profile_dir}")
+            print(f"📊 使用以下命令查看结果: tensorboard --logdir={profile_dir}")
+            print(f"🎯 在浏览器中打开: http://localhost:6006")
+            print(f"📁 查看 'SCALARS' 和 'TEXT' 标签页")
 
         if args.past_index and hasattr(self, "_past"):
             # Clean the state at the end of training

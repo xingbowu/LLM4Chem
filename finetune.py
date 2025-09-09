@@ -8,6 +8,7 @@ import torch
 import transformers
 from datasets import load_dataset
 import datetime
+import torch.profiler as profiler
 
 # SwanLab integration (替换 WandB)
 try:
@@ -112,6 +113,10 @@ def train(
     # performance optimization
     gradient_checkpointing: bool = False,  # FSDP 使用 activation_checkpointing
     dataloader_num_workers: int = 8,  # 增加数据加载并行度
+    # profiling params
+    enable_profiling: bool = False,
+    profile_steps: int = 20,  # 只profile前N步
+    profile_dir: str = "./profiling_logs",
 ):
     if int(os.environ.get("LOCAL_RANK", 0)) == 0:
         print(
@@ -447,11 +452,19 @@ def train(
         if fsdp_config:
             training_args["fsdp_config"] = fsdp_config
     
+    # 创建TrainingArguments
+    training_args_obj = transformers.TrainingArguments(**training_args)
+    
+    # 添加profiling参数到args对象
+    training_args_obj.enable_profiling = enable_profiling
+    training_args_obj.profile_steps = profile_steps
+    training_args_obj.profile_dir = profile_dir
+    
     trainer = CustomTrainer(
         model=model,
         train_dataset=train_data,
         eval_dataset=val_data,
-        args=transformers.TrainingArguments(**training_args),
+        args=training_args_obj,
         data_collator=CustomDataCollator(
             tokenizer, pad_to_multiple_of=8, return_tensors="pt", padding=True
         ),
